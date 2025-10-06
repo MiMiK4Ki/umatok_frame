@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>ロゴ重ね合わせコンポーザ（PNG/GIF・ローカル処理）</title>
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; media-src 'none'; object-src 'none'; frame-ancestors 'none'">
+  <style>
+    :root { --bg:#0b1020; --fg:#e5e7eb; --muted:#94a3b8; --accent:#38bdf8; --line:#1e293b; }
+    *{box-sizing:border-box}
+    html,body{margin:0; padding:0; background:var(--bg); color:var(--fg); font-family: system-ui, -apple-system, Segoe UI, Roboto, "Noto Sans JP", sans-serif;}
+    main{max-width:520px; margin:0 auto; padding:16px; display:flex; flex-direction:column; gap:12px}
+    .card{background:#0b1220; border:1px solid var(--line); border-radius:16px; padding:14px;}
+    .drop{border:2px dashed #334155; border-radius:14px; padding:18px; text-align:center; cursor:pointer;}
+    .drop.dragover{background:#0f1a2b; border-color: var(--accent);} 
+    .hint{color:var(--muted); font-size:12px;}
+    button, .btn{background:linear-gradient(180deg,#1e293b,#0f172a); border:1px solid #334155; color:var(--fg); padding:10px 14px; border-radius:12px; cursor:pointer;}
+    .actions{display:flex; gap:8px; justify-content:space-between; align-items:center}
+    canvas{width:100%; height:auto; display:block; border-radius:12px; background:#020617}
+    label{display:block; font-size:13px; color:var(--muted); margin-bottom:6px}
+    .row{display:flex; gap:10px; align-items:center}
+    input[type="checkbox"]{transform: scale(1.2)}
+  </style>
+</head>
+<body>
+  <main>
+    <div class="card">
+      <canvas id="canvas" width="832" height="1216" aria-label="プレビュー"></canvas>
+    </div>
+
+    <div class="card">
+      <div id="drop" class="drop" tabindex="0" role="button" aria-label="画像Aを選択/ドロップ">
+        <p style="margin:6px 0 10px 0">ここに <b>画像A</b> を <span>タップ/クリック</span> または ドラッグ&ドロップ</p>
+        <p class="hint">推奨幅832px（他サイズも可。幅832に合わせてスケール）</p>
+        <input id="file" type="file" accept="image/*" hidden />
+      </div>
+      <div class="row">
+        <label><input type="checkbox" id="gifMode"> GIFモード（1→2→3→4の順にアニメ）</label>
+      </div>
+    </div>
+
+    <div class="card actions">
+      <a id="btnDownload" class="btn" download="composited.png" href="#" aria-disabled="true">ダウンロード</a>
+      <button id="btnReset" class="btn" type="button">リセット</button>
+    </div>
+  </main>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const canvas = $("canvas");
+  const drop = $("drop"), file = $("file"), gifChk=$("gifMode"), btnDownload=$("btnDownload"), btnReset=$("btnReset");
+  const ctx = canvas.getContext('2d');
+
+  // 固定：出力幅
+  const OUT_W = 832;  // 画像Aは幅832にフィット（他サイズもOK）
+
+  // アセットのパス（同一オリジンに配置）
+  const ASSETS = {
+    fav: './assets/fav_logos.png', // 512x128
+    umat: './assets/umat_k.png',   // 256x128
+    // 事前分割＆リサイズ済み（Pythonスクリプトの出力）
+    oTiles: [
+      './assets/o_1_58.png',
+      './assets/o_2_58.png',
+      './assets/o_3_58.png',
+      './assets/o_4_58.png',
+    ],
+    logoTiles: [
+      './assets/logo_1_112.png',
+      './assets/logo_2_112.png',
+      './assets/logo_3_112.png',
+      './assets/logo_4_112.png',
+    ]
+  };
+
+  // 状態
+  let state = {
+    A: null,  // ImageBitmap of 画像A
+    A_w: 0,
+    A_h: 0,
+    fav: null,
+    umat: null,
+    oTiles: [],
+    logoTiles: [],
+  };
+
+  // ユーティリティ
+  async function loadImg(url){ const resp=await fetch(url); if(!resp.ok) throw new Error('load fail '+url); const b=await resp.blob(); return await createImageBitmap(b); }
+  async function loadFromFile(file){
+    try { return await createImageBitmap(file, { imageOrientation:'from-image' }); }
+    catch { return await new Promise((res,rej)=>{ const u=URL.createObjectURL(file); const img=new Image(); img.onload=()=>{ const c=document.createElement('canvas'); c.width=img.naturalWidth; c.height=img.naturalHeight; c.getContext('2d').drawImage(img,0,0); createImageBitmap(c).then(res); URL.revokeObjectURL(u); }; img.onerror=rej; img.src=u; }); }
+  }
+
+  // 初期ロード（アセット）
+  (async function preload(){
+    try{ state.fav = await loadImg(ASSETS.fav); }catch(e){ console.warn('fav load failed', e); }
+    try{ state.umat = await loadImg(ASSETS.umat); }catch(e){ console.warn('umat load failed', e); }
+    try{ state.oTiles = await Promise.all(ASSETS.oTiles.map(loadImg)); }catch(e){ console.warn('o tiles load failed', e); }
+    try{ state.logoTiles = await Promise.all(ASSETS.logoTiles.map(loadImg)); }catch(e){ console.warn('logo tiles load failed', e); }
+    render();
+  })();
+
+  // 画像Aの受け取り
+  drop.addEventListener('click', ()=> file.click());
+  drop.addEventListener('dragover', (e)=>{ e.preventDefault(); drop.classList.add('dragover'); });
+  drop.addEventListener('dragleave', ()=> drop.classList.remove('dragover'));
+  drop.addEventListener('drop', async (e)=>{
+    e.preventDefault(); drop.classList.remove('dragover');
+    const f = e.dataTransfer.files && e.dataTransfer.files[0]; if(!f) return;
+    await onASelected(f);
+  });
+  file.addEventListener('change', async ()=>{ const f=file.files&&file.files[0]; if(f) await onASelected(f); });
+
+  async function onASelected(f){
+    state.A = await loadFromFile(f); state.A_w = state.A.width; state.A_h = state.A.height; render(); }
+
+  gifChk.addEventListener('change', render);
+  btnReset.addEventListener('click', ()=>{ state.A=null; state.A_w=state.A_h=0; file.value=''; render(); });
+
+  function computeSizes(){
+    const photoH = state.A ? Math.round(OUT_W * (state.A_h / state.A_w)) : 1216; // Aを幅832へフィット
+    canvas.width = OUT_W; canvas.height = photoH;  // 余計なフレームなし
+    return { photoH };
+  }
+
+  function drawBase(){
+    const { photoH } = computeSizes();
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+
+    // 背景: 画像A（横832にフィット）
+    if(state.A){
+      const w = OUT_W; const h = Math.round(state.A_h * (OUT_W / state.A_w));
+      ctx.drawImage(state.A, 0, 0, w, h);
+    }
+
+  // o：58x58 で (umat内座標 187,69) の中心に配置（フレーム idx=1..4）
+  function drawO(idx, umatPos){
+    if(!state.oTiles.length) return;
+    const img = state.oTiles[idx-1];
+    if(!img) return;
+    const size = 58;
+    const centerInUmat = { x:187, y:69 };
+    const cx = umatPos.x + centerInUmat.x;
+    const cy = umatPos.y + centerInUmat.y;
+    const dx = Math.round(cx - size/2);
+    const dy = Math.round(cy - size/2);
+    ctx.drawImage(img, dx, dy, size, size);
+  }
+
+  // logo：112x112 で、umatの左上と logo(1) の右上角が一致（フレーム idx=1..4）
+  function drawLogo(idx, umatPos){
+    if(!state.logoTiles.length) return;
+    const img = state.logoTiles[idx-1];
+    if(!img) return;
+    const size = 112;
+    const dx = Math.round(umatPos.x - size); // 右上角一致（基準: umatの左上）
+    const dy = Math.round(umatPos.y);
+    ctx.drawImage(img, dx, dy, size, size);
+  }
+
+  async function render(){
+    const { favPos, umatPos } = drawBase();
+    if(!state.A || !state.fav) { updateDownloadPNG(); return; }
+
+    if(gifChk.checked){
+      // GIF: 4フレーム（o=1..4 と logo=1..4 を同じフレーム番号で）
+      const frames = [];
+      for(let i=1;i<=4;i++){
+        drawBase();
+        drawO(i, umatPos);
+        drawLogo(i, umatPos);
+        frames.push(ctx.getImageData(0,0,canvas.width,canvas.height));
+      }
+      const blob = await encodeGIF(frames, canvas.width, canvas.height, 200); // 200ms/フレーム
+      const url = URL.createObjectURL(blob);
+      btnDownload.href = url; btnDownload.download = 'composited.gif';
+      btnDownload.textContent = 'GIFをダウンロード';
+      btnDownload.setAttribute('aria-disabled', 'false');
+    } else {
+      // PNG（o=1, logo=1 を重ね）
+      drawO(1, umatPos);
+      drawLogo(1, umatPos);
+      updateDownloadPNG();
+    }
+  }
+
+  function updateDownloadPNG(){
+    canvas.toBlob((blob)=>{
+      if(!blob){ return; }
+      const url = URL.createObjectURL(blob);
+      btnDownload.href = url; btnDownload.download = 'composited.png';
+      btnDownload.textContent = 'PNGをダウンロード';
+      btnDownload.setAttribute('aria-disabled', 'false');
+    }, 'image/png');
+  }
+
+  // ====== 超簡易 GIF エンコーダ（256色・ノンインタレース・各フレーム同サイズ） ======
+  async function encodeGIF(frames, w, h, delayMs){
+    function medianCutPalette(pixels, maxColors){
+      const colors=[]; for(let i=0;i<pixels.length;i+=4){ const a=pixels[i+3]; if(a<32) continue; colors.push([pixels[i],pixels[i+1],pixels[i+2]]); }
+      if(colors.length===0) colors.push([0,0,0]);
+      let boxes=[{colors:colors, r:[0,255], g:[0,255], b:[0,255]}];
+      function range(c,idx){ let mn=255,mx=0; for(const v of c){ if(v[idx]<mn) mn=v[idx]; if(v[idx]>mx) mx=v[idx]; } return [mn,mx]; }
+      while(boxes.length<maxColors){
+        boxes.sort((A,B)=>{ const ra=A.r[1]-A.r[0], ga=A.g[1]-A.g[0], ba=A.b[1]-A.b[0]; const a=Math.max(ra,ga,ba); const rb=B.r[1]-B.r[0], gb=B.g[1]-B.g[0], bb=B.b[1]-B.b[0]; const b=Math.max(rb,gb,bb); return b-a; });
+        const box=boxes.shift(); if(!box||box.colors.length<=1) break;
+        box.r=range(box.colors,0); box.g=range(box.colors,1); box.b=range(box.colors,2);
+        const axis = (box.r[1]-box.r[0] >= box.g[1]-box.g[0] && box.r[1]-box.r[0] >= box.b[1]-box.b[0])?0:((box.g[1]-box.g[0] >= box.b[1]-box.b[0])?1:2);
+        box.colors.sort((a,b)=>a[axis]-b[axis]);
+        const mid=Math.floor(box.colors.length/2);
+        const c1=box.colors.slice(0,mid), c2=box.colors.slice(mid);
+        boxes.push({colors:c1, r:range(c1,0), g:range(c1,1), b:range(c1,2)});
+        boxes.push({colors:c2, r:range(c2,0), g:range(c2,1), b:range(c2,2)});
+      }
+      const palette = boxes.map(b=>{ let r=0,g=0,bv=0; for(const c of b.colors){ r+=c[0]; g+=c[1]; bv+=c[2]; } const n=b.colors.length||1; return [Math.round(r/n),Math.round(g/n),Math.round(bv/n)]; });
+      while(palette.length<2) palette.push([0,0,0]);
+      while(palette.length& (palette.length-1)) palette.push(palette[palette.length-1]);
+      while(palette.length>256) palette.length=256;
+      return palette;
+    }
+    function nearest(pal, r,g,b){ let bi=0,bd=1e9; for(let i=0;i<pal.length;i++){ const pr=pal[i][0]-r, pg=pal[i][1]-g, pb=pal[i][2]-b; const d=pr*pr+pg*pg+pb*pb; if(d<bd){bd=d; bi=i;} } return bi; }
+    function lzwEncode(indices, minCodeSize){
+      const CLEAR = 1<<minCodeSize, END = CLEAR+1; let codeSize = minCodeSize+1;
+      let dict = new Map(); const reset = ()=>{ dict = new Map(); for(let i=0;i<CLEAR;i++) dict.set(String.fromCharCode(i), i); };
+      reset();
+      let data=[]; const out=(code)=>{ buffer|=(code<<bits); bits+=codeSize; while(bits>=8){ bytes.push(buffer&255); buffer>>=8; bits-=8; } };
+      let bytes=[], buffer=0, bits=0;
+      out(CLEAR);
+      let wStr = String.fromCharCode(indices[0]);
+      for(let i=1;i<indices.length;i++){
+        const k = String.fromCharCode(indices[i]);
+        const wk = wStr + k;
+        if(dict.has(wk)){
+          wStr = wk;
+        } else {
+          out(dict.get(wStr));
+          dict.set(wk, dict.size);
+          if(dict.size === (1<<codeSize) && codeSize < 12) codeSize++;
+          wStr = k;
+        }
+      }
+      out(dict.get(wStr));
+      out(END);
+      if(bits>0) bytes.push(buffer & 255);
+      const blocks=[]; let p=0; while(p<bytes.length){ const n=Math.min(255, bytes.length-p); blocks.push(n); blocks.push(...bytes.slice(p,p+n)); p+=n; }
+      blocks.push(0);
+      return new Uint8Array(blocks);
+    }
+    const pal = medianCutPalette(frames[0].data, 256);
+    const palDepth = Math.ceil(Math.log2(pal.length));
+    const out = [];
+    function pushStr(s){ for(let i=0;i<s.length;i++) out.push(s.charCodeAt(i)); }
+    function push16(v){ out.push(v & 0xFF, (v>>8)&0xFF); }
+    pushStr('GIF89a');
+    push16(w); push16(h);
+    const gctFlag=1, colorRes=7, sort=0, gctSize=Math.max(0, palDepth-1);
+    out.push((gctFlag<<7)|(colorRes<<4)|(sort<<3)|gctSize);
+    out.push(0);
+    out.push(0);
+    for(let i=0;i<(1<<(gctSize+1));i++){ const c=pal[i]||[0,0,0]; out.push(c[0],c[1],c[2]); }
+    pushStr('!ÿNETSCAPE2.0'); push16(0); out.push(0);
+    for(const fr of frames){
+      out.push(0x21, 0xF9, 0x04, 0x04);
+      const delay = Math.max(2, Math.round(delayMs/10)); push16(delay); out.push(0); out.push(0);
+      out.push(0x2C); push16(0); push16(0); push16(w); push16(h); out.push(0);
+      const idx = new Uint8Array(w*h); let p=0; for(let y=0;y<h;y++){ for(let x=0;x<w;x++){ const o=(y*w+x)*4; const r=fr.data[o], g=fr.data[o+1], b=fr.data[o+2], a=fr.data[o+3]; idx[p++] = a<16 ? 0 : nearest(pal,r,g,b); }}
+      const lzwMin = Math.max(2, palDepth);
+      out.push(lzwMin);
+      const lzw = lzwEncode(idx, lzwMin);
+      for(const b of lzw) out.push(b);
+    }
+    out.push(0x3B);
+    return new Blob([new Uint8Array(out)], {type:'image/gif'});
+  }
+})();
+</script>
+</body>
+</html>
