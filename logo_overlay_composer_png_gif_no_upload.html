@@ -120,23 +120,47 @@
 
   function computeSizes(){
     const photoH = state.A ? Math.round(OUT_W * (state.A_h / state.A_w)) : 1216; // Aを幅832へフィット
-    canvas.width = OUT_W; canvas.height = photoH;  // 余計なフレームなし
+    canvas.width = OUT_W;
+    canvas.height = photoH;
     return { photoH };
   }
 
   function drawBase(){
-    const { photoH } = computeSizes();
-    ctx.clearRect(0,0,canvas.width,canvas.height);
+    computeSizes();
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // 背景: 画像A（横832にフィット）
-    if(state.A){
-      const w = OUT_W; const h = Math.round(state.A_h * (OUT_W / state.A_w));
+    let favPos = null;
+    let umatPos = null;
+
+    if (state.A) {
+      const w = OUT_W;
+      const h = Math.round(state.A_h * (OUT_W / state.A_w));
       ctx.drawImage(state.A, 0, 0, w, h);
     }
 
-  // o：58x58 で (umat内座標 187,69) の中心に配置（フレーム idx=1..4）
+    if (state.fav) {
+      const w = state.fav.width;
+      const h = state.fav.height;
+      const dx = canvas.width - w;
+      const dy = canvas.height - h;
+      ctx.drawImage(state.fav, dx, dy, w, h);
+      favPos = { x: dx, y: dy, w, h };
+    }
+
+    if (state.umat) {
+      const w = state.umat.width;
+      const h = state.umat.height;
+      const dx = canvas.width - w;
+      const dy = favPos ? favPos.y - h : canvas.height - h;
+      ctx.drawImage(state.umat, dx, dy, w, h);
+      umatPos = { x: dx, y: dy, w, h };
+    }
+
+    return { favPos, umatPos };
+  }
+
   function drawO(idx, umatPos){
-    if(!state.oTiles.length) return;
+    if(!state.oTiles.length || !umatPos) return;
     const img = state.oTiles[idx-1];
     if(!img) return;
     const size = 58;
@@ -148,37 +172,46 @@
     ctx.drawImage(img, dx, dy, size, size);
   }
 
-  // logo：112x112 で、umatの左上と logo(1) の右上角が一致（フレーム idx=1..4）
   function drawLogo(idx, umatPos){
-    if(!state.logoTiles.length) return;
+    if(!state.logoTiles.length || !umatPos) return;
     const img = state.logoTiles[idx-1];
     if(!img) return;
     const size = 112;
-    const dx = Math.round(umatPos.x - size); // 右上角一致（基準: umatの左上）
+    const dx = Math.round(umatPos.x - size);
     const dy = Math.round(umatPos.y);
     ctx.drawImage(img, dx, dy, size, size);
   }
 
-  async function render(){
-    const { favPos, umatPos } = drawBase();
-    if(!state.A || !state.fav) { updateDownloadPNG(); return; }
+  function resetDownload(){
+    btnDownload.href = '#';
+    btnDownload.removeAttribute('download');
+    btnDownload.textContent = 'ダウンロード';
+    btnDownload.setAttribute('aria-disabled', 'true');
+  }
 
-    if(gifChk.checked){
-      // GIF: 4フレーム（o=1..4 と logo=1..4 を同じフレーム番号で）
+  async function render(){
+    const { umatPos } = drawBase();
+
+    if(!state.A){
+      resetDownload();
+      return;
+    }
+
+    if(gifChk.checked && state.oTiles.length && state.logoTiles.length){
       const frames = [];
       for(let i=1;i<=4;i++){
-        drawBase();
-        drawO(i, umatPos);
-        drawLogo(i, umatPos);
+        const baseState = drawBase();
+        drawO(i, baseState.umatPos);
+        drawLogo(i, baseState.umatPos);
         frames.push(ctx.getImageData(0,0,canvas.width,canvas.height));
       }
-      const blob = await encodeGIF(frames, canvas.width, canvas.height, 200); // 200ms/フレーム
+      const blob = await encodeGIF(frames, canvas.width, canvas.height, 200);
       const url = URL.createObjectURL(blob);
-      btnDownload.href = url; btnDownload.download = 'composited.gif';
+      btnDownload.href = url;
+      btnDownload.download = 'composited.gif';
       btnDownload.textContent = 'GIFをダウンロード';
       btnDownload.setAttribute('aria-disabled', 'false');
     } else {
-      // PNG（o=1, logo=1 を重ね）
       drawO(1, umatPos);
       drawLogo(1, umatPos);
       updateDownloadPNG();
@@ -259,7 +292,8 @@
     out.push(0);
     out.push(0);
     for(let i=0;i<(1<<(gctSize+1));i++){ const c=pal[i]||[0,0,0]; out.push(c[0],c[1],c[2]); }
-    pushStr('!ÿNETSCAPE2.0'); push16(0); out.push(0);
+    pushStr('!\xFFNETSCAPE2.0'); push16(0); out.push(0);
+NETSCAPE2.0'); push16(0); out.push(0);
     for(const fr of frames){
       out.push(0x21, 0xF9, 0x04, 0x04);
       const delay = Math.max(2, Math.round(delayMs/10)); push16(delay); out.push(0); out.push(0);
