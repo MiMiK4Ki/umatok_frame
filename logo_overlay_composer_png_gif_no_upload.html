@@ -292,8 +292,7 @@
     out.push(0);
     out.push(0);
     for(let i=0;i<(1<<(gctSize+1));i++){ const c=pal[i]||[0,0,0]; out.push(c[0],c[1],c[2]); }
-    pushStr('!\xFFNETSCAPE2.0'); push16(0); out.push(0);
-NETSCAPE2.0'); push16(0); out.push(0);
+    out.push(0x21, 0xFF, 0x0B); pushStr('NETSCAPE2.0'); out.push(0x03, 0x01); push16(0); out.push(0);
     for(const fr of frames){
       out.push(0x21, 0xF9, 0x04, 0x04);
       const delay = Math.max(2, Math.round(delayMs/10)); push16(delay); out.push(0); out.push(0);
